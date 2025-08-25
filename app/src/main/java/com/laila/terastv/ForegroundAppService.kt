@@ -1,0 +1,245 @@
+package com.laila.terastv.ui
+
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.IBinder
+import android.provider.Settings
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.lifecycle.LifecycleService
+import com.laila.terastv.ApiStatus
+import com.laila.terastv.LoggingApi
+import com.laila.terastv.MainActivity
+import com.laila.terastv.R
+import com.laila.terastv.RetrofitClient
+import kotlinx.coroutines.*
+import retrofit2.Call
+import retrofit2.Callback
+import retrofit2.Response
+import java.text.SimpleDateFormat
+import java.util.*
+
+class ForegroundAppService : LifecycleService() {
+
+    companion object {
+        private const val TAG = "FgAppService"
+        private const val CHANNEL_ID = "app_usage_channel"
+        private const val CHANNEL_NAME = "App Usage Tracking"
+        private const val NOTIF_ID = 7101
+        private const val TICK_MS = 1000L
+        private val IGNORE = setOf(
+            "com.android.systemui",
+            "com.google.android.tvlauncher",
+            "com.android.launcher",
+            "com.google.android.leanbacklauncher"
+        )
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val api: LoggingApi by lazy { RetrofitClient.api }
+
+    private var currentPkg: String? = null
+    private var currentLabel: String = ""
+    private var sessionStartMs: Long = 0L
+
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "onCreate()")
+        startForegroundInternal()
+        Log.d(TAG, "startForeground() done, starting polling loop…")
+        startPolling()
+    }
+
+    override fun onDestroy() {
+        Log.d(TAG, "onDestroy()")
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
+
+    private fun startForegroundInternal() {
+        createChannelIfNeeded()
+
+        val pendingIntentFlags =
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                    if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0
+
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            },
+            pendingIntentFlags
+        )
+
+        val notif = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Tracking App Usage")
+            .setContentText("Monitoring foreground apps…")
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .build()
+
+        startForeground(NOTIF_ID, notif)
+    }
+
+    private fun createChannelIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (mgr.getNotificationChannel(CHANNEL_ID) == null) {
+                val ch = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_MIN)
+                ch.setShowBadge(false)
+                mgr.createNotificationChannel(ch)
+            }
+        }
+    }
+
+    private fun startPolling() {
+        if (!hasUsageAccess()) {
+            Log.w(TAG, "Usage access NOT granted. Open Settings and grant 'Usage Access' to this app.")
+        }
+
+        sessionStartMs = System.currentTimeMillis()
+        currentPkg = null
+        currentLabel = ""
+
+        scope.launch {
+            while (isActive) {
+                try {
+                    val top = getTopPackage()
+                    val ourPkg = packageName
+
+                    if (top != null) {
+                        val topIsIgnored = isIgnored(top, ourPkg)
+
+                        if (currentPkg != null && currentPkg != top) {
+                            if (!isIgnored(currentPkg!!, ourPkg)) {
+                                commitSession(
+                                    pkg = currentPkg!!,
+                                    label = currentLabel,
+                                    start = sessionStartMs,
+                                    end = System.currentTimeMillis()
+                                )
+                            }
+
+                            if (!topIsIgnored) {
+                                currentPkg = top
+                                currentLabel = appLabel(top)
+                                sessionStartMs = System.currentTimeMillis()
+                                Log.d(TAG, "▶ start $currentLabel ($top)")
+                            } else {
+                                currentPkg = null
+                                currentLabel = ""
+                                sessionStartMs = System.currentTimeMillis()
+                            }
+                        }
+
+                        if (currentPkg == null && !topIsIgnored) {
+                            currentPkg = top
+                            currentLabel = appLabel(top)
+                            sessionStartMs = System.currentTimeMillis()
+                            Log.d(TAG, "▶ start $currentLabel ($top)")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "poll error", e)
+                }
+
+                delay(TICK_MS)
+            }
+        }
+    }
+
+    private fun isIgnored(pkg: String, ourPkg: String): Boolean =
+        pkg == ourPkg || IGNORE.contains(pkg)
+
+    private fun hasUsageAccess(): Boolean {
+        return try {
+            Settings.Secure.getInt(contentResolver, "usage_stats_enabled", 0) == 1
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    private fun getTopPackage(): String? {
+        val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val end = System.currentTimeMillis()
+        val begin = end - 10_000
+        val events = usm.queryEvents(begin, end)
+
+        var lastPkg: String? = null
+        val e = UsageEvents.Event()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(e)
+            if (e.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
+                e.eventType == UsageEvents.Event.ACTIVITY_RESUMED
+            ) {
+                lastPkg = e.packageName
+            }
+        }
+        return lastPkg
+    }
+
+    private fun appLabel(pkg: String): String {
+        return try {
+            val pm = packageManager
+            val info = pm.getApplicationInfo(pkg, 0)
+            pm.getApplicationLabel(info)?.toString() ?: pkg
+        } catch (_: Exception) {
+            pkg
+        }
+    }
+
+    private fun commitSession(pkg: String, label: String, start: Long, end: Long) {
+        val secs = ((end - start) / 1000L).toInt().coerceAtLeast(1)
+        if (secs < 2) {
+            Log.d(TAG, "⏭ ignore short session $label ($pkg) ${secs}s")
+            return
+        }
+
+        val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+        val sn = prefs.getString("sn_tv", null)
+        if (sn.isNullOrBlank()) {
+            Log.w(TAG, "No sn_tv in prefs; skip POST")
+            return
+        }
+
+        val tvStart = prefs.getLong("tv_timer_start_ms", System.currentTimeMillis())
+        val tvSecs = (((end - tvStart).coerceAtLeast(0L)) / 1000L).toInt()
+
+        val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(end))
+
+        val body = mapOf(
+            "sn_tv" to sn,
+            "date" to nowStr,
+            "app_name" to label,
+            "app_url" to "",
+            "thumbnail" to "",
+            "app_duration" to secs,
+            "tv_duration" to tvSecs
+        )
+
+        Log.d(TAG, "⏹ end $label ($pkg) ${secs}s → POST /tv-history")
+        api.postHistory(body).enqueue(object : Callback<ApiStatus> {
+            override fun onResponse(call: Call<ApiStatus>, response: Response<ApiStatus>) {
+                if (response.isSuccessful) {
+                    Log.d(TAG, "POST /tv-history OK: ${response.body()?.status}")
+                } else {
+                    Log.w(TAG, "POST /tv-history HTTP ${response.code()} ${response.message()}")
+                }
+            }
+
+            override fun onFailure(call: Call<ApiStatus>, t: Throwable) {
+                Log.e(TAG, "POST /tv-history failed", t)
+            }
+        })
+    }
+}
