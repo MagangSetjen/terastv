@@ -7,13 +7,13 @@ import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Query
 
-// Generic “status” wrapper used by several endpoints
+// Generic “status” wrapper for simple ok/error responses
 data class ApiStatus(
     val status: String,
     val message: String? = null
 )
 
-// History list wrapper that your PHP returns: { status: "success", data: [...] }
+// History list wrapper: { status: "success", data: [...] }
 data class TvHistoryResponse(
     val status: String,
     val data: List<TvHistoryDto> = emptyList()
@@ -21,14 +21,14 @@ data class TvHistoryResponse(
 
 interface LoggingApi {
 
-    // (legacy) still available
+    // Legacy endpoints left intact
     @POST("log_start.php")
     fun logStart(@Body body: Map<String, String>): Call<Void>
 
     @POST("log_end.php")
     fun logEnd(@Body body: Map<String, String>): Call<Void>
 
-    // ✅ IMPORTANT: suppress JVM wildcard so Retrofit sees Map<String, Object>
+    // Main endpoints
     @POST("tv-history")
     fun postHistory(
         @Body body: Map<String, @JvmSuppressWildcards Any?>

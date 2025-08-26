@@ -33,6 +33,9 @@ class ForegroundAppService : LifecycleService() {
         private const val CHANNEL_NAME = "App Usage Tracking"
         private const val NOTIF_ID = 7101
         private const val TICK_MS = 1000L
+        // Broadcast action to notify UI that a history row was posted
+        const val ACTION_HISTORY_POSTED = "com.laila.terastv.ACTION_HISTORY_POSTED"
+
         private val IGNORE = setOf(
             "com.android.systemui",
             "com.google.android.tvlauncher",
@@ -221,7 +224,7 @@ class ForegroundAppService : LifecycleService() {
             "sn_tv" to sn,
             "date" to nowStr,
             "app_name" to label,
-            "app_url" to "",
+            "app_url" to pkg, // use package as URL identifier
             "thumbnail" to "",
             "app_duration" to secs,
             "tv_duration" to tvSecs
@@ -232,6 +235,8 @@ class ForegroundAppService : LifecycleService() {
             override fun onResponse(call: Call<ApiStatus>, response: Response<ApiStatus>) {
                 if (response.isSuccessful) {
                     Log.d(TAG, "POST /tv-history OK: ${response.body()?.status}")
+                    // 🔔 Notify UI to refresh immediately
+                    sendBroadcast(Intent(ACTION_HISTORY_POSTED))
                 } else {
                     Log.w(TAG, "POST /tv-history HTTP ${response.code()} ${response.message()}")
                 }

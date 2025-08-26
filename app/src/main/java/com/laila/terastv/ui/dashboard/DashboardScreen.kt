@@ -39,6 +39,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
+// ★ NEW imports (broadcast + intent)
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+// ★ reference your service constant via FQCN
+//import com.laila.terastv.ForegroundAppService
+import com.laila.terastv.ui.ForegroundAppService
+
 data class AppUsageData(
     val no: Int,
     val snTV: String,
@@ -67,8 +76,21 @@ fun DashboardScreen(
     val prefs = remember { context.getSharedPreferences("tv_prefs", Context.MODE_PRIVATE) }
     val startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
 
+    // ★ NEW: tick to force refresh from multiple places
+    var refreshTick by remember { mutableStateOf(0) }
+
+    // ★ helper to bump refresh (keeps your existing loader intact)
+    fun refreshHistoryNow() {
+        try {
+            refreshTick++
+        } catch (t: Throwable) {
+            Log.e("Dashboard", "refreshHistory failed", t)
+        }
+    }
+
     // ✅ Fetch usage history (non-blocking di IO)
-    LaunchedEffect(serial) {
+    // ★ include refreshTick so we can trigger reloads
+    LaunchedEffect(serial, refreshTick) {
         try {
             val resp = withContext(Dispatchers.IO) {
                 RetrofitClient.api.getUsageHistory(serial).execute()
@@ -94,6 +116,30 @@ fun DashboardScreen(
             appUsageList.addAll(uiList)
         } catch (e: Exception) {
             Log.e("Dashboard", "Usage history error", e)
+        }
+    }
+
+    // ★ NEW: listen for ForegroundAppService broadcast and refresh instantly
+    DisposableEffect(Unit) {
+        val filter = IntentFilter(ForegroundAppService.ACTION_HISTORY_POSTED)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                refreshHistoryNow()
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+
+    // ★ OPTIONAL: gentle polling every 10s in case a broadcast is missed
+    LaunchedEffect(serial) {
+        while (isActive) {
+            delay(10_000)
+            refreshHistoryNow()
         }
     }
 

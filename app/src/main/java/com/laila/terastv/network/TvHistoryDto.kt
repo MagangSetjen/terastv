@@ -9,7 +9,7 @@ import com.google.gson.annotations.SerializedName
  */
 data class TvHistoryDto(
     @SerializedName("sn_tv") val snTv: String,
-    @SerializedName("date") val date: JsonElement?,      // <-- important change
+    @SerializedName("date") val date: JsonElement?,      // tolerant to string/object
     @SerializedName("thumbnail") val thumbnail: String?,
     @SerializedName("app_name") val appName: String,
     @SerializedName("app_url") val appUrl: String,
