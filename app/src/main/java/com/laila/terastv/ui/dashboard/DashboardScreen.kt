@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.GetApp
+import androidx.compose.material.icons.filled.Refresh     // ★ keep
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -44,9 +45,9 @@ import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-// ★ reference your service constant via FQCN
-//import com.laila.terastv.ForegroundAppService
+// ★ reference your service constants
 import com.laila.terastv.ui.ForegroundAppService
+import kotlinx.coroutines.launch // (Compose runtime already available)
 
 data class AppUsageData(
     val no: Int,
@@ -72,24 +73,16 @@ fun DashboardScreen(
 
     LaunchedEffect(Unit) { Log.d("Dashboard", "Dashboard loaded successfully") }
 
-    // ✅ BACA start time dari SharedPreferences (jangan set di sini)
+    // ✅ read start time from SharedPreferences
     val prefs = remember { context.getSharedPreferences("tv_prefs", Context.MODE_PRIVATE) }
-    val startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
+    // ▼▼▼ CHANGE: make this MUTABLE so UI can snap to 00:00:00 on reset
+    var startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
 
-    // ★ NEW: tick to force refresh from multiple places
+    // ★ small tick so we can force history refreshes
     var refreshTick by remember { mutableStateOf(0) }
+    fun refreshHistoryNow() { refreshTick++ }
 
-    // ★ helper to bump refresh (keeps your existing loader intact)
-    fun refreshHistoryNow() {
-        try {
-            refreshTick++
-        } catch (t: Throwable) {
-            Log.e("Dashboard", "refreshHistory failed", t)
-        }
-    }
-
-    // ✅ Fetch usage history (non-blocking di IO)
-    // ★ include refreshTick so we can trigger reloads
+    // ✅ Load history (IO thread)
     LaunchedEffect(serial, refreshTick) {
         try {
             val resp = withContext(Dispatchers.IO) {
@@ -119,12 +112,15 @@ fun DashboardScreen(
         }
     }
 
-    // ★ NEW: listen for ForegroundAppService broadcast and refresh instantly
+    // ★ Listen for service broadcast and refresh + pull latest startMs
     DisposableEffect(Unit) {
         val filter = IntentFilter(ForegroundAppService.ACTION_HISTORY_POSTED)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
+                // refresh table
                 refreshHistoryNow()
+                // keep timer display in sync with service (0 when reset, new value when restarted)
+                startMs = prefs.getLong("tv_timer_start_ms", 0L)
             }
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -135,13 +131,18 @@ fun DashboardScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // ★ OPTIONAL: gentle polling every 10s in case a broadcast is missed
+    // ★ OPTIONAL: gentle polling to keep things fresh even if a broadcast is missed
     LaunchedEffect(serial) {
         while (isActive) {
             delay(10_000)
             refreshHistoryNow()
+            // also re-sync the timer from prefs periodically
+            startMs = prefs.getLong("tv_timer_start_ms", 0L)
         }
     }
+
+    // ← add a tiny helper scope for one-shot tasks (already part of Compose)
+    val scope = rememberCoroutineScope()
 
     Column(
         modifier = modifier
@@ -170,7 +171,7 @@ fun DashboardScreen(
             }
         }
 
-        // Cards row
+        // Cards row (left: school info, right: timer)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -227,7 +228,7 @@ fun DashboardScreen(
             }
         }
 
-        // History / actions row
+        // Title + actions row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -244,6 +245,49 @@ fun DashboardScreen(
             )
 
             Row {
+                // ★ Reset button (red). Sends a broadcast AND snaps timer to 00:00:00 immediately.
+                Button(
+                    onClick = {
+                        // Ask the service to post a "PowerOff" row + clear timer in prefs
+                        context.sendBroadcast(
+                            Intent(ForegroundAppService.ACTION_REQUEST_RESET_TIMER)
+                        )
+                        // Snap the timer right away so the UI reflects reset instantly
+                        prefs.edit().putLong("tv_timer_start_ms", 0L).apply()
+                        startMs = 0L
+                        // Optionally nudge the table
+                        refreshHistoryNow()
+
+                        // ★ NEW: after a short moment, re-read the new start set by the service
+                        // so the counter resumes even if the broadcast is missed.
+                        scope.launch {
+                            delay(500)
+                            startMs = prefs.getLong("tv_timer_start_ms", 0L)
+                        }
+                    },
+                    modifier = Modifier
+                        .height(36.dp)
+                        .padding(end = 8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFD32F2F),
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Reset",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Reset",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        fontFamily = getRobotoFontFamily()
+                    )
+                }
+
                 Button(
                     onClick = { /* Handle filter */ },
                     modifier = Modifier.padding(end = 8.dp),
@@ -292,7 +336,7 @@ fun DashboardScreen(
         // ===== Table (flex) =====
         Card(
             modifier = Modifier
-                .weight(1f)       // 👈 ambil sisa tinggi layar secara fleksibel
+                .weight(1f)
                 .fillMaxWidth(),
             shape = RoundedCornerShape(8.dp),
             colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -318,9 +362,7 @@ fun DashboardScreen(
 
                 Divider(color = Color(0xFFE0E0E0), thickness = 1.dp)
 
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize() // 👈 isi tabel memenuhi Card
-                ) {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
                     itemsIndexed(appUsageList) { index, item ->
                         Row(
                             modifier = Modifier
@@ -360,7 +402,7 @@ fun DashboardScreen(
                         }
                     }
 
-                    // spacer rows (opsional)
+                    // spacer rows (optional)
                     items(4) {
                         Row(
                             modifier = Modifier
@@ -377,7 +419,7 @@ fun DashboardScreen(
             }
         }
 
-        // ===== Button "Tentang aplikasi" di bawah tabel =====
+        // ===== about button =====
         Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -413,10 +455,7 @@ fun DashboardScreen(
 
 @Composable
 fun RowScope.TableHeaderCell(text: String, weight: Float) {
-    Box(
-        modifier = Modifier.weight(weight),
-        contentAlignment = Alignment.CenterStart
-    ) {
+    Box(modifier = Modifier.weight(weight), contentAlignment = Alignment.CenterStart) {
         Text(
             text = text,
             fontSize = 14.sp,
@@ -430,10 +469,7 @@ fun RowScope.TableHeaderCell(text: String, weight: Float) {
 
 @Composable
 fun RowScope.TableDataCell(text: String, weight: Float) {
-    Box(
-        modifier = Modifier.weight(weight),
-        contentAlignment = Alignment.CenterStart
-    ) {
+    Box(modifier = Modifier.weight(weight), contentAlignment = Alignment.CenterStart) {
         Text(
             text = text,
             fontSize = 14.sp,
