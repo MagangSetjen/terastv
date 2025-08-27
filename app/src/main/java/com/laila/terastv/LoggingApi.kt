@@ -1,6 +1,7 @@
 package com.laila.terastv
 
 import com.laila.terastv.network.TvHistoryDto
+import okhttp3.ResponseBody
 import retrofit2.Call
 import retrofit2.http.Body
 import retrofit2.http.GET
@@ -16,7 +17,7 @@ interface LoggingApi {
     @POST("log_end.php")   fun logEnd(@Body body: Map<String, String>): Call<Void>
 
     @POST("tv-history")
-    fun postHistory(@Body body: Map<String, @JvmSuppressWildcards Any?>): Call<ApiStatus>
+    fun postHistory(@Body body: Map<String, @JvmSuppressWildcards Any?>): Call<ResponseBody>
 
     @GET("tv-history")
     fun getUsageHistory(@Query("sn_tv") serial: String): Call<TvHistoryResponse>
