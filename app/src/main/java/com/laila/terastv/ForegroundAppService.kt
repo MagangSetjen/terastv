@@ -40,7 +40,7 @@ class ForegroundAppService : LifecycleService() {
         // Broadcasts
         const val ACTION_HISTORY_POSTED = "com.laila.terastv.ACTION_HISTORY_POSTED"
         const val ACTION_REQUEST_RESET_TIMER = "com.laila.terastv.ACTION_REQUEST_RESET_TIMER"
-        // ★ NEW: sent after the reset row is posted and new start is set
+        // sent after a reset/lap has been posted and a fresh start is set
         const val ACTION_TIMER_RESET_DONE = "com.laila.terastv.ACTION_TIMER_RESET_DONE"
         const val EXTRA_NEW_START_MS = "newStartMs"
 
@@ -59,6 +59,7 @@ class ForegroundAppService : LifecycleService() {
     private var currentLabel: String = ""
     private var sessionStartMs: Long = 0L
 
+    // receives clicks from the red Reset button
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_REQUEST_RESET_TIMER) {
@@ -68,15 +69,50 @@ class ForegroundAppService : LifecycleService() {
         }
     }
 
+    // NEW: react to emulator/TV screen off/on (standby) to create a “PowerOff” lap and restart timer
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    Log.d(TAG, "SCREEN_OFF → lap & reset")
+                    performResetAndPost("PowerOff")
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+                    val cur = prefs.getLong("tv_timer_start_ms", 0L)
+                    if (cur <= 0L) {
+                        val now = System.currentTimeMillis()
+                        prefs.edit().putLong("tv_timer_start_ms", now).apply()
+                        sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, now))
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         startForegroundInternal()
         registerReceiver(resetReceiver, IntentFilter(ACTION_REQUEST_RESET_TIMER))
+
+        // register screen on/off so emulator power button triggers a lap
+        registerReceiver(
+            screenReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+        )
+
+        // if device shut down previously, post the saved “PowerOff” lap now, then restart timer
+        postPendingUptimeIfAny()
+
         startPolling()
     }
 
     override fun onDestroy() {
         try { unregisterReceiver(resetReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         scope.cancel()
         super.onDestroy()
     }
@@ -217,7 +253,6 @@ class ForegroundAppService : LifecycleService() {
         )
 
         Log.d(TAG, "⏹ end $label ($pkg) ${secs}s → POST /tv-history")
-        // NOTE: in your project LoggingApi.postHistory now returns Call<ResponseBody>
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
             override fun onResponse(call: Call<ResponseBody>, response: Response<ResponseBody>) {
                 if (response.isSuccessful) sendBroadcast(Intent(ACTION_HISTORY_POSTED))
@@ -229,7 +264,7 @@ class ForegroundAppService : LifecycleService() {
         })
     }
 
-    /** Reset timer: capture exact elapsed BEFORE reset, post it, then start fresh and notify UI. */
+    /** POST a lap for the elapsed time BEFORE reset, then start a fresh timer and tell the UI. */
     private fun performResetAndPost(label: String) {
         val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
@@ -238,11 +273,9 @@ class ForegroundAppService : LifecycleService() {
         val now = System.currentTimeMillis()
 
         if (start <= 0L) {
-            // no running timer, just start a new one and notify UI
+            // no running timer; just start fresh and inform UI
             prefs.edit().putLong("tv_timer_start_ms", now).apply()
-            sendBroadcast(
-                Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, now)
-            )
+            sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, now))
             return
         }
 
@@ -263,21 +296,71 @@ class ForegroundAppService : LifecycleService() {
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
             override fun onResponse(call: Call<ResponseBody>, response: Response<ResponseBody>) {
                 sendBroadcast(Intent(ACTION_HISTORY_POSTED))
-                // start a fresh timer AFTER we posted the lap
                 val newStart = System.currentTimeMillis()
                 prefs.edit().putLong("tv_timer_start_ms", newStart).apply()
-                sendBroadcast(
-                    Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, newStart)
-                )
+                sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, newStart))
             }
             override fun onFailure(call: Call<ResponseBody>, t: Throwable) {
                 Log.e(TAG, "Reset POST failed", t)
-                // even if network fails, still restart local timer so UI keeps running
                 val newStart = System.currentTimeMillis()
                 prefs.edit().putLong("tv_timer_start_ms", newStart).apply()
-                sendBroadcast(
-                    Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, newStart)
-                )
+                sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, newStart))
+            }
+        })
+    }
+
+    /** If the TV powered off, we saved a pending lap; post it now and restart the timer. */
+    private fun postPendingUptimeIfAny() {
+        val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+        val pending = prefs.getBoolean("pending_uptime", false)
+        if (!pending) return
+
+        val endMs = prefs.getLong("pending_uptime_end_ms", System.currentTimeMillis())
+        val secs  = prefs.getInt("pending_uptime_secs", 0).coerceAtLeast(0)
+        val sn    = prefs.getString("sn_tv", null) ?: run {
+            // clear flags and bail if no serial
+            prefs.edit().putBoolean("pending_uptime", false).apply()
+            return
+        }
+
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(endMs))
+        val body = mapOf(
+            "sn_tv" to sn,
+            "date" to dateStr,
+            "app_name" to "PowerOff",
+            "app_url" to "",
+            "thumbnail" to "",
+            "app_duration" to secs,
+            "tv_duration" to secs
+        )
+
+        Log.d(TAG, "Posting pending uptime from shutdown ($secs s)")
+        api.postHistory(body).enqueue(object : Callback<ResponseBody> {
+            override fun onResponse(call: Call<ResponseBody>, response: Response<ResponseBody>) {
+                // clear pending flags
+                prefs.edit()
+                    .putBoolean("pending_uptime", false)
+                    .remove("pending_uptime_end_ms")
+                    .remove("pending_uptime_secs")
+                    .apply()
+
+                // start fresh timer from now and notify UI
+                val newStart = System.currentTimeMillis()
+                prefs.edit().putLong("tv_timer_start_ms", newStart).apply()
+                sendBroadcast(Intent(ACTION_HISTORY_POSTED))
+                sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, newStart))
+            }
+            override fun onFailure(call: Call<ResponseBody>, t: Throwable) {
+                Log.e(TAG, "Posting pending uptime failed", t)
+                // still clear + restart locally so UI keeps running
+                val newStart = System.currentTimeMillis()
+                prefs.edit()
+                    .putBoolean("pending_uptime", false)
+                    .remove("pending_uptime_end_ms")
+                    .remove("pending_uptime_secs")
+                    .putLong("tv_timer_start_ms", newStart)
+                    .apply()
+                sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, newStart))
             }
         })
     }

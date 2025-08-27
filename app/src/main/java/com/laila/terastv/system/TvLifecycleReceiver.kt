@@ -29,7 +29,7 @@ class TvLifecycleReceiver : BroadcastReceiver() {
             }
 
             Intent.ACTION_BOOT_COMPLETED -> {
-                // Reset the timer to start counting from boot
+                // Start a fresh timer right after boot (the service will post the pending lap)
                 prefs.edit()
                     .putLong("tv_timer_start_ms", System.currentTimeMillis())
                     .apply()
