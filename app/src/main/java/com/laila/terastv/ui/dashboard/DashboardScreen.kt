@@ -13,7 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.GetApp
-import androidx.compose.material.icons.filled.Refresh     // ★ keep
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,14 +40,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
-// ★ NEW imports (broadcast + intent)
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-// ★ reference your service constants
 import com.laila.terastv.ui.ForegroundAppService
-import kotlinx.coroutines.launch // (Compose runtime already available)
 
 data class AppUsageData(
     val no: Int,
@@ -73,23 +70,18 @@ fun DashboardScreen(
 
     LaunchedEffect(Unit) { Log.d("Dashboard", "Dashboard loaded successfully") }
 
-    // ✅ read start time from SharedPreferences
     val prefs = remember { context.getSharedPreferences("tv_prefs", Context.MODE_PRIVATE) }
-    // ▼▼▼ CHANGE: make this MUTABLE so UI can snap to 00:00:00 on reset
     var startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
 
-    // ★ small tick so we can force history refreshes
     var refreshTick by remember { mutableStateOf(0) }
     fun refreshHistoryNow() { refreshTick++ }
 
-    // ✅ Load history (IO thread)
     LaunchedEffect(serial, refreshTick) {
         try {
             val resp = withContext(Dispatchers.IO) {
                 RetrofitClient.api.getUsageHistory(serial).execute()
             }
             val dtoList = if (resp.isSuccessful) resp.body()?.data.orEmpty() else emptyList()
-
             val uiList = dtoList
                 .filter { it.snTv == serial }
                 .mapIndexed { idx, d ->
@@ -104,7 +96,6 @@ fun DashboardScreen(
                         durasiTV  = formatSeconds(d.tvDuration ?: 0)
                     )
                 }
-
             appUsageList.clear()
             appUsageList.addAll(uiList)
         } catch (e: Exception) {
@@ -112,15 +103,30 @@ fun DashboardScreen(
         }
     }
 
-    // ★ Listen for service broadcast and refresh + pull latest startMs
+    // Listen for history posted and for "reset done" (gives us new start)
     DisposableEffect(Unit) {
-        val filter = IntentFilter(ForegroundAppService.ACTION_HISTORY_POSTED)
+        val filter = IntentFilter().apply {
+            addAction(ForegroundAppService.ACTION_HISTORY_POSTED)
+            addAction(ForegroundAppService.ACTION_TIMER_RESET_DONE) // ★ listen new
+        }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                // refresh table
-                refreshHistoryNow()
-                // keep timer display in sync with service (0 when reset, new value when restarted)
-                startMs = prefs.getLong("tv_timer_start_ms", 0L)
+                when (intent?.action) {
+                    ForegroundAppService.ACTION_HISTORY_POSTED -> {
+                        refreshHistoryNow()
+                        startMs = prefs.getLong("tv_timer_start_ms", 0L)
+                    }
+                    ForegroundAppService.ACTION_TIMER_RESET_DONE -> {
+                        // snap to the fresh start provided by service (post-lap)
+                        val newStart = intent.getLongExtra(ForegroundAppService.EXTRA_NEW_START_MS, 0L)
+                        if (newStart > 0L) {
+                            startMs = newStart
+                        } else {
+                            startMs = prefs.getLong("tv_timer_start_ms", 0L)
+                        }
+                        refreshHistoryNow()
+                    }
+                }
             }
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -131,25 +137,19 @@ fun DashboardScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // ★ OPTIONAL: gentle polling to keep things fresh even if a broadcast is missed
     LaunchedEffect(serial) {
         while (isActive) {
             delay(10_000)
             refreshHistoryNow()
-            // also re-sync the timer from prefs periodically
             startMs = prefs.getLong("tv_timer_start_ms", 0L)
         }
     }
-
-    // ← add a tiny helper scope for one-shot tasks (already part of Compose)
-    val scope = rememberCoroutineScope()
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Close button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -171,14 +171,12 @@ fun DashboardScreen(
             }
         }
 
-        // Cards row (left: school info, right: timer)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // School Info Card
             Card(
                 modifier = Modifier.weight(1f),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -212,7 +210,6 @@ fun DashboardScreen(
                 }
             }
 
-            // Timer Card
             Card(
                 modifier = Modifier.wrapContentWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -228,7 +225,6 @@ fun DashboardScreen(
             }
         }
 
-        // Title + actions row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -245,25 +241,12 @@ fun DashboardScreen(
             )
 
             Row {
-                // ★ Reset button (red). Sends a broadcast AND snaps timer to 00:00:00 immediately.
                 Button(
                     onClick = {
-                        // Ask the service to post a "PowerOff" row + clear timer in prefs
+                        // only request reset; service will post the lap and then broadcast the new start
                         context.sendBroadcast(
                             Intent(ForegroundAppService.ACTION_REQUEST_RESET_TIMER)
                         )
-                        // Snap the timer right away so the UI reflects reset instantly
-                        prefs.edit().putLong("tv_timer_start_ms", 0L).apply()
-                        startMs = 0L
-                        // Optionally nudge the table
-                        refreshHistoryNow()
-
-                        // ★ NEW: after a short moment, re-read the new start set by the service
-                        // so the counter resumes even if the broadcast is missed.
-                        scope.launch {
-                            delay(500)
-                            startMs = prefs.getLong("tv_timer_start_ms", 0L)
-                        }
                     },
                     modifier = Modifier
                         .height(36.dp)
@@ -333,7 +316,6 @@ fun DashboardScreen(
             }
         }
 
-        // ===== Table (flex) =====
         Card(
             modifier = Modifier
                 .weight(1f)
@@ -402,7 +384,6 @@ fun DashboardScreen(
                         }
                     }
 
-                    // spacer rows (optional)
                     items(4) {
                         Row(
                             modifier = Modifier
@@ -419,7 +400,6 @@ fun DashboardScreen(
             }
         }
 
-        // ===== about button =====
         Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -492,7 +472,6 @@ fun DashboardScreenPreview() {
     }
 }
 
-/** COUNTER yang menunggu sampai startMs > 0; aman dari recomposition/config change. */
 @Composable
 fun TVDurationCounterStartable(startMs: Long) {
     if (startMs <= 0L) {
@@ -527,7 +506,6 @@ fun TVDurationCounterStartable(startMs: Long) {
     )
 }
 
-/** ms → HH:MM:SS (untuk card timer) */
 fun formatDuration(ms: Long): String {
     val totalSeconds = (ms / 1000).coerceAtLeast(0)
     val hours = totalSeconds / 3600
@@ -536,7 +514,6 @@ fun formatDuration(ms: Long): String {
     return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
 }
 
-/** seconds → HH:MM:SS (untuk cell tabel) */
 private fun formatSeconds(totalSecondsIn: Int): String {
     val total = totalSecondsIn.coerceAtLeast(0)
     val hours = total / 3600
@@ -545,7 +522,6 @@ private fun formatSeconds(totalSecondsIn: Int): String {
     return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
 }
 
-/** Normalize backend "date" (string/object) */
 private fun jsonDateToString(el: JsonElement?): String {
     if (el == null || el.isJsonNull) return ""
     return when (el) {
