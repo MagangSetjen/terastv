@@ -53,7 +53,8 @@ class ForegroundAppService : LifecycleService() {
         private const val KEY_LAST_APP_TITLE = "last_app_title"
         private const val KEY_LAST_APP_TITLE_PKG = "last_app_title_pkg"
         private const val KEY_LAST_APP_TITLE_TIME = "last_app_title_time"
-        private const val TITLE_STALENESS_MS = 15_000L
+        // make title a little less strict so slow A11y updates are still picked up
+        private const val TITLE_STALENESS_MS = 60_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -231,14 +232,38 @@ class ForegroundAppService : LifecycleService() {
         try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0))?.toString() ?: pkg }
         catch (_: Exception) { pkg }
 
-    /** Read the freshest captured title for this package; fallback to app label. */
+    /** Read the freshest captured title for this package; fallback to app label, with a last-resort title if label==pkg. */
     private fun getLatestTitleFor(pkg: String): String {
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val savedPkg = prefs.getString(KEY_LAST_APP_TITLE_PKG, null)
         val title = prefs.getString(KEY_LAST_APP_TITLE, null)
         val ts = prefs.getLong(KEY_LAST_APP_TITLE_TIME, 0L)
-        val fresh = System.currentTimeMillis() - ts <= TITLE_STALENESS_MS
-        return if (pkg == savedPkg && fresh && !title.isNullOrBlank()) title else appLabel(pkg)
+        val age = System.currentTimeMillis() - ts
+        val fresh = age in 0..TITLE_STALENESS_MS
+
+        val label = appLabel(pkg)
+
+        // Primary: exact package match + fresh + non-empty
+        if (pkg == savedPkg && fresh && !title.isNullOrBlank()) {
+            Log.d(TAG, "Using fresh title from prefs for $pkg: \"$title\" (age=${age}ms)")
+            return title
+        }
+
+        // Fallback 1: if label is meaningful (not a package string), use it
+        if (label.isNotBlank() && label != pkg) {
+            Log.d(TAG, "Using app label for $pkg: \"$label\"")
+            return label
+        }
+
+        // Fallback 2 (last resort): if saved title is fresh & non-empty, use it even if pkg didn’t match
+        if (fresh && !title.isNullOrBlank()) {
+            Log.d(TAG, "Using last-resort fresh title: \"$title\" (pkg mismatch, age=${age}ms)")
+            return title
+        }
+
+        // Final fallback: package name
+        Log.d(TAG, "Falling back to package name for $pkg")
+        return pkg
     }
 
     private fun commitSession(pkg: String, label: String, start: Long, end: Long) {
@@ -332,7 +357,7 @@ class ForegroundAppService : LifecycleService() {
             prefs.edit().putBoolean("pending_uptime", false).apply()
             return
         }
-        val npsn  = prefs.getString("npsn", null) ?: run {  // ★ include NPSN
+        val npsn  = prefs.getString("npsn", null) ?: run {
             prefs.edit().putBoolean("pending_uptime", false).apply()
             return
         }

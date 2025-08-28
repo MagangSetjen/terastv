@@ -63,7 +63,7 @@
 
         <!-- ✅ AccessibilityService to read window/app titles (required to capture video titles/taglines) -->
         <service
-            android:name=".ui.AppTitleService"
+            android:name=".AppTitleService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="false">
             <intent-filter>
