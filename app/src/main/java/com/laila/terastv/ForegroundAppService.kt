@@ -211,6 +211,7 @@ class ForegroundAppService : LifecycleService() {
 
     private fun getTopPackage(): String? {
         val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        the@run {  }
         val end = System.currentTimeMillis()
         val begin = end - 10_000
         val events = usm.queryEvents(begin, end)
@@ -237,12 +238,13 @@ class ForegroundAppService : LifecycleService() {
 
         val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
+        val npsn = prefs.getString("npsn", null) // ⬅️ read npsn if saved at registration
 
         val tvStart = prefs.getLong("tv_timer_start_ms", System.currentTimeMillis())
         val tvSecs = (((end - tvStart).coerceAtLeast(0L)) / 1000L).toInt()
         val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(end))
 
-        val body = mapOf(
+        val body = mutableMapOf<String, Any?>(
             "sn_tv" to sn,
             "date" to nowStr,
             "app_name" to label,
@@ -251,6 +253,7 @@ class ForegroundAppService : LifecycleService() {
             "app_duration" to secs,
             "tv_duration" to tvSecs
         )
+        if (!npsn.isNullOrBlank()) body["npsn"] = npsn  // ⬅️ include when available
 
         Log.d(TAG, "⏹ end $label ($pkg) ${secs}s → POST /tv-history")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
@@ -268,6 +271,7 @@ class ForegroundAppService : LifecycleService() {
     private fun performResetAndPost(label: String) {
         val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
+        val npsn = prefs.getString("npsn", null) // ⬅️ read npsn
 
         val start = prefs.getLong("tv_timer_start_ms", 0L)
         val now = System.currentTimeMillis()
@@ -282,7 +286,7 @@ class ForegroundAppService : LifecycleService() {
         val secs = (((now - start).coerceAtLeast(0L)) / 1000L).toInt()
         val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(now))
 
-        val body = mapOf(
+        val body = mutableMapOf<String, Any?>(
             "sn_tv" to sn,
             "date" to nowStr,
             "app_name" to label,  // “PowerOff”
@@ -291,6 +295,7 @@ class ForegroundAppService : LifecycleService() {
             "app_duration" to secs,
             "tv_duration" to secs
         )
+        if (!npsn.isNullOrBlank()) body["npsn"] = npsn  // ⬅️ include when available
 
         Log.d(TAG, "Resetting timer → POST /tv-history ($label, $secs s)")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
@@ -322,9 +327,10 @@ class ForegroundAppService : LifecycleService() {
             prefs.edit().putBoolean("pending_uptime", false).apply()
             return
         }
+        val npsn  = prefs.getString("npsn", null) // ⬅️ read npsn
 
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(endMs))
-        val body = mapOf(
+        val body = mutableMapOf<String, Any?>(
             "sn_tv" to sn,
             "date" to dateStr,
             "app_name" to "PowerOff",
@@ -333,6 +339,7 @@ class ForegroundAppService : LifecycleService() {
             "app_duration" to secs,
             "tv_duration" to secs
         )
+        if (!npsn.isNullOrBlank()) body["npsn"] = npsn  // ⬅️ include when available
 
         Log.d(TAG, "Posting pending uptime from shutdown ($secs s)")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {

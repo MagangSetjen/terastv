@@ -13,7 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.GetApp
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Refresh     // ★ keep
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,10 +40,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
+// ★ NEW imports (broadcast + intent)
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+// ★ reference your service constants
 import com.laila.terastv.ui.ForegroundAppService
 
 data class AppUsageData(
@@ -70,20 +72,25 @@ fun DashboardScreen(
 
     LaunchedEffect(Unit) { Log.d("Dashboard", "Dashboard loaded successfully") }
 
+    // ✅ read start time from SharedPreferences
     val prefs = remember { context.getSharedPreferences("tv_prefs", Context.MODE_PRIVATE) }
+    // ▼▼▼ keep mutable so we can snap to 00:00:00 on reset
     var startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
 
+    // ★ small tick so we can force history refreshes
     var refreshTick by remember { mutableStateOf(0) }
     fun refreshHistoryNow() { refreshTick++ }
 
-    LaunchedEffect(serial, refreshTick) {
+    // ✅ Load history (IO thread) — ⬇️ now calls API with (npsn, serial)
+    LaunchedEffect(npsn, serial, refreshTick) {
         try {
             val resp = withContext(Dispatchers.IO) {
-                RetrofitClient.api.getUsageHistory(serial).execute()
+                RetrofitClient.api.getUsageHistory(npsn, serial).execute()
             }
             val dtoList = if (resp.isSuccessful) resp.body()?.data.orEmpty() else emptyList()
+
             val uiList = dtoList
-                .filter { it.snTv == serial }
+                .filter { it.snTv == serial } // keep your local filter
                 .mapIndexed { idx, d ->
                     AppUsageData(
                         no = idx + 1,
@@ -96,6 +103,7 @@ fun DashboardScreen(
                         durasiTV  = formatSeconds(d.tvDuration ?: 0)
                     )
                 }
+
             appUsageList.clear()
             appUsageList.addAll(uiList)
         } catch (e: Exception) {
@@ -103,7 +111,7 @@ fun DashboardScreen(
         }
     }
 
-    // Listen for history posted and for "reset done" (gives us new start)
+    // ★ Listen for service broadcast and refresh + pull latest startMs
     DisposableEffect(Unit) {
         val filter = IntentFilter().apply {
             addAction(ForegroundAppService.ACTION_HISTORY_POSTED)
@@ -117,13 +125,8 @@ fun DashboardScreen(
                         startMs = prefs.getLong("tv_timer_start_ms", 0L)
                     }
                     ForegroundAppService.ACTION_TIMER_RESET_DONE -> {
-                        // snap to the fresh start provided by service (post-lap)
                         val newStart = intent.getLongExtra(ForegroundAppService.EXTRA_NEW_START_MS, 0L)
-                        if (newStart > 0L) {
-                            startMs = newStart
-                        } else {
-                            startMs = prefs.getLong("tv_timer_start_ms", 0L)
-                        }
+                        startMs = if (newStart > 0L) newStart else prefs.getLong("tv_timer_start_ms", 0L)
                         refreshHistoryNow()
                     }
                 }
@@ -137,7 +140,8 @@ fun DashboardScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    LaunchedEffect(serial) {
+    // ★ OPTIONAL: gentle polling to keep things fresh
+    LaunchedEffect(npsn, serial) {
         while (isActive) {
             delay(10_000)
             refreshHistoryNow()
@@ -150,6 +154,7 @@ fun DashboardScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
+        // …………………… (everything below unchanged UI) ……………………
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -243,7 +248,6 @@ fun DashboardScreen(
             Row {
                 Button(
                     onClick = {
-                        // only request reset; service will post the lap and then broadcast the new start
                         context.sendBroadcast(
                             Intent(ForegroundAppService.ACTION_REQUEST_RESET_TIMER)
                         )
@@ -384,6 +388,7 @@ fun DashboardScreen(
                         }
                     }
 
+                    // spacer rows (optional)
                     items(4) {
                         Row(
                             modifier = Modifier
@@ -465,8 +470,8 @@ fun RowScope.TableDataCell(text: String, weight: Float) {
 fun DashboardScreenPreview() {
     TerasTVTheme {
         DashboardScreen(
-            npsn = "0123456789",
-            namaSekolah = "SMKN 1 NEGERI TANGGERANG",
+            npsn = "01234567",
+            namaSekolah = "SMKN 1 NEGERI TANGERANG",
             serial = "SN-TV"
         )
     }
