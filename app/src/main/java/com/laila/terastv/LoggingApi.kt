@@ -19,7 +19,7 @@ interface LoggingApi {
     @POST("tv-history")
     fun postHistory(@Body body: Map<String, @JvmSuppressWildcards Any?>): Call<ResponseBody>
 
-    // ⬇️ now requires BOTH npsn and sn_tv
+    // now requires BOTH npsn and sn_tv
     @GET("tv-history")
     fun getUsageHistory(
         @Query("npsn") npsn: String,

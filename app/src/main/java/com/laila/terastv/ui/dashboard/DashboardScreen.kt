@@ -2,7 +2,6 @@ package com.laila.terastv.ui.dashboard
 
 import android.content.Context
 import android.util.Log
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -13,7 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.GetApp
-import androidx.compose.material.icons.filled.Refresh     // ★ keep
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,7 +21,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -30,7 +28,6 @@ import androidx.compose.ui.unit.sp
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
-import com.laila.terastv.R
 import com.laila.terastv.RetrofitClient
 import com.laila.terastv.ui.theme.TerasTVTheme
 import com.laila.terastv.ui.theme.getRobotoFontFamily
@@ -40,21 +37,19 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
-// ★ NEW imports (broadcast + intent)
+// broadcasts
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-// ★ reference your service constants
 import com.laila.terastv.ui.ForegroundAppService
 
 data class AppUsageData(
     val no: Int,
     val snTV: String,
     val tanggal: String,
-    val thumbnail: String,
     val namaApp: String,
-    val urlApp: String,
+    val appTitle: String,
     val durasiApp: String,
     val durasiTV: String
 )
@@ -72,16 +67,15 @@ fun DashboardScreen(
 
     LaunchedEffect(Unit) { Log.d("Dashboard", "Dashboard loaded successfully") }
 
-    // ✅ read start time from SharedPreferences
+    // read start time
     val prefs = remember { context.getSharedPreferences("tv_prefs", Context.MODE_PRIVATE) }
-    // ▼▼▼ keep mutable so we can snap to 00:00:00 on reset
     var startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
 
-    // ★ small tick so we can force history refreshes
+    // refresh tick
     var refreshTick by remember { mutableStateOf(0) }
     fun refreshHistoryNow() { refreshTick++ }
 
-    // ✅ Load history (IO thread) — ⬇️ now calls API with (npsn, serial)
+    // load history (now uses npsn + serial)
     LaunchedEffect(npsn, serial, refreshTick) {
         try {
             val resp = withContext(Dispatchers.IO) {
@@ -90,15 +84,14 @@ fun DashboardScreen(
             val dtoList = if (resp.isSuccessful) resp.body()?.data.orEmpty() else emptyList()
 
             val uiList = dtoList
-                .filter { it.snTv == serial } // keep your local filter
+                .filter { it.snTv == serial }
                 .mapIndexed { idx, d ->
                     AppUsageData(
                         no = idx + 1,
                         snTV = d.snTv,
                         tanggal = jsonDateToString(d.date),
-                        thumbnail = d.thumbnail ?: "",
                         namaApp = d.appName,
-                        urlApp = d.appUrl,
+                        appTitle = d.appTitle ?: "",
                         durasiApp = formatSeconds(d.appDuration ?: 0),
                         durasiTV  = formatSeconds(d.tvDuration ?: 0)
                     )
@@ -111,11 +104,11 @@ fun DashboardScreen(
         }
     }
 
-    // ★ Listen for service broadcast and refresh + pull latest startMs
+    // listen for service broadcasts
     DisposableEffect(Unit) {
         val filter = IntentFilter().apply {
             addAction(ForegroundAppService.ACTION_HISTORY_POSTED)
-            addAction(ForegroundAppService.ACTION_TIMER_RESET_DONE) // ★ listen new
+            addAction(ForegroundAppService.ACTION_TIMER_RESET_DONE)
         }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -140,7 +133,7 @@ fun DashboardScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // ★ OPTIONAL: gentle polling to keep things fresh
+    // gentle polling
     LaunchedEffect(npsn, serial) {
         while (isActive) {
             delay(10_000)
@@ -154,7 +147,7 @@ fun DashboardScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // …………………… (everything below unchanged UI) ……………………
+        // close button row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -176,12 +169,14 @@ fun DashboardScreen(
             }
         }
 
+        // cards row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // school card
             Card(
                 modifier = Modifier.weight(1f),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -215,6 +210,7 @@ fun DashboardScreen(
                 }
             }
 
+            // timer card
             Card(
                 modifier = Modifier.wrapContentWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -230,6 +226,7 @@ fun DashboardScreen(
             }
         }
 
+        // header + actions
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -320,6 +317,7 @@ fun DashboardScreen(
             }
         }
 
+        // history table
         Card(
             modifier = Modifier
                 .weight(1f)
@@ -339,9 +337,8 @@ fun DashboardScreen(
                     TableHeaderCell("No.", weight = 0.7f)
                     TableHeaderCell("SN-TV", weight = 1.2f)
                     TableHeaderCell("Tanggal", weight = 1.3f)
-                    TableHeaderCell("Thumbnail", weight = 1.2f)
-                    TableHeaderCell("Nama App", weight = 1.2f)
-                    TableHeaderCell("URL App", weight = 1.8f)
+                    TableHeaderCell("Nama App", weight = 1.6f)
+                    TableHeaderCell("App Title", weight = 2.4f)
                     TableHeaderCell("Durasi App", weight = 1.3f)
                     TableHeaderCell("Durasi TV", weight = 1.3f)
                 }
@@ -360,25 +357,8 @@ fun DashboardScreen(
                             TableDataCell(item.no.toString(), weight = 0.7f)
                             TableDataCell(item.snTV, weight = 1.2f)
                             TableDataCell(item.tanggal, weight = 1.3f)
-
-                            Box(
-                                modifier = Modifier
-                                    .weight(1.2f)
-                                    .height(32.dp)
-                                    .padding(end = 12.dp)
-                                    .background(Color(0xFFF0F0F0), RoundedCornerShape(4.dp))
-                                    .border(1.dp, Color(0xFFE0E0E0), RoundedCornerShape(4.dp)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Image(
-                                    painter = painterResource(id = R.drawable.placeholder_img),
-                                    contentDescription = "Thumbnail",
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-
-                            TableDataCell(item.namaApp, weight = 1.2f)
-                            TableDataCell(item.urlApp, weight = 1.8f)
+                            TableDataCell(item.namaApp, weight = 1.6f)
+                            TableDataCell(item.appTitle, weight = 2.4f)
                             TableDataCell(item.durasiApp, weight = 1.3f)
                             TableDataCell(item.durasiTV, weight = 1.3f)
                         }
@@ -397,7 +377,7 @@ fun DashboardScreen(
                                 .padding(horizontal = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            repeat(8) { Box(modifier = Modifier.weight(1f)) }
+                            repeat(7) { Box(modifier = Modifier.weight(1f)) }
                         }
                         Divider(color = Color(0xFFE0E0E0), thickness = 1.dp)
                     }
@@ -477,6 +457,7 @@ fun DashboardScreenPreview() {
     }
 }
 
+/** Counter that waits until startMs > 0; safe across recompositions. */
 @Composable
 fun TVDurationCounterStartable(startMs: Long) {
     if (startMs <= 0L) {

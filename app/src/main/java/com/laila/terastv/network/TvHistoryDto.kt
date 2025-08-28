@@ -12,7 +12,7 @@ data class TvHistoryDto(
     @SerializedName("date") val date: JsonElement?,      // tolerant to string/object
     @SerializedName("thumbnail") val thumbnail: String?,
     @SerializedName("app_name") val appName: String,
-    @SerializedName("app_url") val appUrl: String,
+    @SerializedName("app_title") val appTitle: String,
     @SerializedName("app_duration") val appDuration: Int?,   // seconds
     @SerializedName("tv_duration")  val tvDuration: Int?     // seconds
 )

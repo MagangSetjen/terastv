@@ -69,7 +69,7 @@ class ForegroundAppService : LifecycleService() {
         }
     }
 
-    // NEW: react to emulator/TV screen off/on (standby) to create a “PowerOff” lap and restart timer
+    // react to screen off/on to create a “PowerOff” lap and restart timer
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -95,7 +95,7 @@ class ForegroundAppService : LifecycleService() {
         startForegroundInternal()
         registerReceiver(resetReceiver, IntentFilter(ACTION_REQUEST_RESET_TIMER))
 
-        // register screen on/off so emulator power button triggers a lap
+        // screen on/off
         registerReceiver(
             screenReceiver,
             IntentFilter().apply {
@@ -211,7 +211,6 @@ class ForegroundAppService : LifecycleService() {
 
     private fun getTopPackage(): String? {
         val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        the@run {  }
         val end = System.currentTimeMillis()
         val begin = end - 10_000
         val events = usm.queryEvents(begin, end)
@@ -238,22 +237,22 @@ class ForegroundAppService : LifecycleService() {
 
         val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
-        val npsn = prefs.getString("npsn", null) // ⬅️ read npsn if saved at registration
+        val npsn = prefs.getString("npsn", null) // include if available
 
         val tvStart = prefs.getLong("tv_timer_start_ms", System.currentTimeMillis())
         val tvSecs = (((end - tvStart).coerceAtLeast(0L)) / 1000L).toInt()
         val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(end))
 
+        // ⬇️ app_title now carries the human label (what you asked)
         val body = mutableMapOf<String, Any?>(
             "sn_tv" to sn,
             "date" to nowStr,
             "app_name" to label,
-            "app_url" to pkg,
-            "thumbnail" to "",
+            "app_title" to label,
             "app_duration" to secs,
             "tv_duration" to tvSecs
         )
-        if (!npsn.isNullOrBlank()) body["npsn"] = npsn  // ⬅️ include when available
+        if (!npsn.isNullOrBlank()) body["npsn"] = npsn
 
         Log.d(TAG, "⏹ end $label ($pkg) ${secs}s → POST /tv-history")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
@@ -271,13 +270,12 @@ class ForegroundAppService : LifecycleService() {
     private fun performResetAndPost(label: String) {
         val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
-        val npsn = prefs.getString("npsn", null) // ⬅️ read npsn
+        val npsn = prefs.getString("npsn", null)
 
         val start = prefs.getLong("tv_timer_start_ms", 0L)
         val now = System.currentTimeMillis()
 
         if (start <= 0L) {
-            // no running timer; just start fresh and inform UI
             prefs.edit().putLong("tv_timer_start_ms", now).apply()
             sendBroadcast(Intent(ACTION_TIMER_RESET_DONE).putExtra(EXTRA_NEW_START_MS, now))
             return
@@ -289,13 +287,12 @@ class ForegroundAppService : LifecycleService() {
         val body = mutableMapOf<String, Any?>(
             "sn_tv" to sn,
             "date" to nowStr,
-            "app_name" to label,  // “PowerOff”
-            "app_url" to "",
-            "thumbnail" to "",
+            "app_name" to label,   // “PowerOff”
+            "app_title" to "",     // no title on power off
             "app_duration" to secs,
             "tv_duration" to secs
         )
-        if (!npsn.isNullOrBlank()) body["npsn"] = npsn  // ⬅️ include when available
+        if (!npsn.isNullOrBlank()) body["npsn"] = npsn
 
         Log.d(TAG, "Resetting timer → POST /tv-history ($label, $secs s)")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
@@ -323,35 +320,31 @@ class ForegroundAppService : LifecycleService() {
         val endMs = prefs.getLong("pending_uptime_end_ms", System.currentTimeMillis())
         val secs  = prefs.getInt("pending_uptime_secs", 0).coerceAtLeast(0)
         val sn    = prefs.getString("sn_tv", null) ?: run {
-            // clear flags and bail if no serial
             prefs.edit().putBoolean("pending_uptime", false).apply()
             return
         }
-        val npsn  = prefs.getString("npsn", null) // ⬅️ read npsn
+        val npsn  = prefs.getString("npsn", null)
 
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(endMs))
         val body = mutableMapOf<String, Any?>(
             "sn_tv" to sn,
             "date" to dateStr,
             "app_name" to "PowerOff",
-            "app_url" to "",
-            "thumbnail" to "",
+            "app_title" to "",
             "app_duration" to secs,
             "tv_duration" to secs
         )
-        if (!npsn.isNullOrBlank()) body["npsn"] = npsn  // ⬅️ include when available
+        if (!npsn.isNullOrBlank()) body["npsn"] = npsn
 
         Log.d(TAG, "Posting pending uptime from shutdown ($secs s)")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
             override fun onResponse(call: Call<ResponseBody>, response: Response<ResponseBody>) {
-                // clear pending flags
                 prefs.edit()
                     .putBoolean("pending_uptime", false)
                     .remove("pending_uptime_end_ms")
                     .remove("pending_uptime_secs")
                     .apply()
 
-                // start fresh timer from now and notify UI
                 val newStart = System.currentTimeMillis()
                 prefs.edit().putLong("tv_timer_start_ms", newStart).apply()
                 sendBroadcast(Intent(ACTION_HISTORY_POSTED))
@@ -359,7 +352,6 @@ class ForegroundAppService : LifecycleService() {
             }
             override fun onFailure(call: Call<ResponseBody>, t: Throwable) {
                 Log.e(TAG, "Posting pending uptime failed", t)
-                // still clear + restart locally so UI keeps running
                 val newStart = System.currentTimeMillis()
                 prefs.edit()
                     .putBoolean("pending_uptime", false)
