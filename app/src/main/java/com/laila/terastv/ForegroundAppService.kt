@@ -15,7 +15,6 @@ import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
-import com.laila.terastv.ApiStatus
 import com.laila.terastv.LoggingApi
 import com.laila.terastv.MainActivity
 import com.laila.terastv.R
@@ -37,10 +36,8 @@ class ForegroundAppService : LifecycleService() {
         private const val NOTIF_ID = 7101
         private const val TICK_MS = 1000L
 
-        // Broadcasts
         const val ACTION_HISTORY_POSTED = "com.laila.terastv.ACTION_HISTORY_POSTED"
         const val ACTION_REQUEST_RESET_TIMER = "com.laila.terastv.ACTION_REQUEST_RESET_TIMER"
-        // sent after a reset/lap has been posted and a fresh start is set
         const val ACTION_TIMER_RESET_DONE = "com.laila.terastv.ACTION_TIMER_RESET_DONE"
         const val EXTRA_NEW_START_MS = "newStartMs"
 
@@ -50,6 +47,13 @@ class ForegroundAppService : LifecycleService() {
             "com.android.launcher",
             "com.google.android.leanbacklauncher"
         )
+
+        // SharedPreferences keys
+        private const val PREFS = "tv_prefs"
+        private const val KEY_LAST_APP_TITLE = "last_app_title"
+        private const val KEY_LAST_APP_TITLE_PKG = "last_app_title_pkg"
+        private const val KEY_LAST_APP_TITLE_TIME = "last_app_title_time"
+        private const val TITLE_STALENESS_MS = 15_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -59,7 +63,6 @@ class ForegroundAppService : LifecycleService() {
     private var currentLabel: String = ""
     private var sessionStartMs: Long = 0L
 
-    // receives clicks from the red Reset button
     private val resetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_REQUEST_RESET_TIMER) {
@@ -69,7 +72,6 @@ class ForegroundAppService : LifecycleService() {
         }
     }
 
-    // react to screen off/on to create a “PowerOff” lap and restart timer
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -78,7 +80,7 @@ class ForegroundAppService : LifecycleService() {
                     performResetAndPost("PowerOff")
                 }
                 Intent.ACTION_SCREEN_ON -> {
-                    val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+                    val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     val cur = prefs.getLong("tv_timer_start_ms", 0L)
                     if (cur <= 0L) {
                         val now = System.currentTimeMillis()
@@ -93,20 +95,20 @@ class ForegroundAppService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         startForegroundInternal()
+
         registerReceiver(resetReceiver, IntentFilter(ACTION_REQUEST_RESET_TIMER))
 
-        // screen on/off
-        registerReceiver(
-            screenReceiver,
-            IntentFilter().apply {
-                addAction(Intent.ACTION_SCREEN_OFF)
-                addAction(Intent.ACTION_SCREEN_ON)
-            }
-        )
+        val screenFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(screenReceiver, screenFilter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(screenReceiver, screenFilter)
+        }
 
-        // if device shut down previously, post the saved “PowerOff” lap now, then restart timer
         postPendingUptimeIfAny()
-
         startPolling()
     }
 
@@ -151,9 +153,7 @@ class ForegroundAppService : LifecycleService() {
     }
 
     private fun startPolling() {
-        if (!hasUsageAccess()) {
-            Log.w(TAG, "Usage access NOT granted")
-        }
+        if (!hasUsageAccess()) Log.w(TAG, "Usage access NOT granted")
         sessionStartMs = System.currentTimeMillis()
         currentPkg = null
         currentLabel = ""
@@ -231,30 +231,41 @@ class ForegroundAppService : LifecycleService() {
         try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0))?.toString() ?: pkg }
         catch (_: Exception) { pkg }
 
+    /** Read the freshest captured title for this package; fallback to app label. */
+    private fun getLatestTitleFor(pkg: String): String {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val savedPkg = prefs.getString(KEY_LAST_APP_TITLE_PKG, null)
+        val title = prefs.getString(KEY_LAST_APP_TITLE, null)
+        val ts = prefs.getLong(KEY_LAST_APP_TITLE_TIME, 0L)
+        val fresh = System.currentTimeMillis() - ts <= TITLE_STALENESS_MS
+        return if (pkg == savedPkg && fresh && !title.isNullOrBlank()) title else appLabel(pkg)
+    }
+
     private fun commitSession(pkg: String, label: String, start: Long, end: Long) {
         val secs = ((end - start) / 1000L).toInt().coerceAtLeast(1)
         if (secs < 2) return
 
-        val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
-        val npsn = prefs.getString("npsn", null) // include if available
+        val npsn = prefs.getString("npsn", null) ?: return  // ★ include NPSN
 
         val tvStart = prefs.getLong("tv_timer_start_ms", System.currentTimeMillis())
         val tvSecs = (((end - tvStart).coerceAtLeast(0L)) / 1000L).toInt()
         val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(end))
 
-        // ⬇️ app_title now carries the human label (what you asked)
-        val body = mutableMapOf<String, Any?>(
+        val appTitle = getLatestTitleFor(pkg)
+
+        val body = mapOf(
+            "npsn" to npsn,                 // ★ now sent
             "sn_tv" to sn,
             "date" to nowStr,
             "app_name" to label,
-            "app_title" to label,
+            "app_title" to appTitle,
             "app_duration" to secs,
             "tv_duration" to tvSecs
         )
-        if (!npsn.isNullOrBlank()) body["npsn"] = npsn
 
-        Log.d(TAG, "⏹ end $label ($pkg) ${secs}s → POST /tv-history")
+        Log.d(TAG, "⏹ end $label ($pkg) ${secs}s → POST /tv-history title=\"$appTitle\"")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
             override fun onResponse(call: Call<ResponseBody>, response: Response<ResponseBody>) {
                 if (response.isSuccessful) sendBroadcast(Intent(ACTION_HISTORY_POSTED))
@@ -266,11 +277,10 @@ class ForegroundAppService : LifecycleService() {
         })
     }
 
-    /** POST a lap for the elapsed time BEFORE reset, then start a fresh timer and tell the UI. */
     private fun performResetAndPost(label: String) {
-        val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val sn = prefs.getString("sn_tv", null) ?: return
-        val npsn = prefs.getString("npsn", null)
+        val npsn = prefs.getString("npsn", null) ?: return  // ★ include NPSN
 
         val start = prefs.getLong("tv_timer_start_ms", 0L)
         val now = System.currentTimeMillis()
@@ -284,15 +294,15 @@ class ForegroundAppService : LifecycleService() {
         val secs = (((now - start).coerceAtLeast(0L)) / 1000L).toInt()
         val nowStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(now))
 
-        val body = mutableMapOf<String, Any?>(
+        val body = mapOf(
+            "npsn" to npsn,               // ★ now sent
             "sn_tv" to sn,
             "date" to nowStr,
-            "app_name" to label,   // “PowerOff”
-            "app_title" to "",     // no title on power off
+            "app_name" to label,
+            "app_title" to label,
             "app_duration" to secs,
             "tv_duration" to secs
         )
-        if (!npsn.isNullOrBlank()) body["npsn"] = npsn
 
         Log.d(TAG, "Resetting timer → POST /tv-history ($label, $secs s)")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
@@ -311,9 +321,8 @@ class ForegroundAppService : LifecycleService() {
         })
     }
 
-    /** If the TV powered off, we saved a pending lap; post it now and restart the timer. */
     private fun postPendingUptimeIfAny() {
-        val prefs = getSharedPreferences("tv_prefs", Context.MODE_PRIVATE)
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val pending = prefs.getBoolean("pending_uptime", false)
         if (!pending) return
 
@@ -323,18 +332,21 @@ class ForegroundAppService : LifecycleService() {
             prefs.edit().putBoolean("pending_uptime", false).apply()
             return
         }
-        val npsn  = prefs.getString("npsn", null)
+        val npsn  = prefs.getString("npsn", null) ?: run {  // ★ include NPSN
+            prefs.edit().putBoolean("pending_uptime", false).apply()
+            return
+        }
 
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(endMs))
-        val body = mutableMapOf<String, Any?>(
+        val body = mapOf(
+            "npsn" to npsn,             // ★ now sent
             "sn_tv" to sn,
             "date" to dateStr,
             "app_name" to "PowerOff",
-            "app_title" to "",
+            "app_title" to "PowerOff",
             "app_duration" to secs,
             "tv_duration" to secs
         )
-        if (!npsn.isNullOrBlank()) body["npsn"] = npsn
 
         Log.d(TAG, "Posting pending uptime from shutdown ($secs s)")
         api.postHistory(body).enqueue(object : Callback<ResponseBody> {
