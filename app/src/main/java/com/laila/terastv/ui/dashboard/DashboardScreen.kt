@@ -2,6 +2,7 @@ package com.laila.terastv.ui.dashboard
 
 import android.content.Context
 import android.util.Log
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -11,7 +12,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
-import androidx.compose.material.icons.filled.GetApp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material3.*
@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
+import com.laila.terastv.R
 import com.laila.terastv.RetrofitClient
 import com.laila.terastv.ui.theme.TerasTVTheme
 import com.laila.terastv.ui.theme.getRobotoFontFamily
@@ -35,9 +37,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.Calendar
 
-// broadcasts
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
@@ -48,8 +51,9 @@ data class AppUsageData(
     val no: Int,
     val snTV: String,
     val tanggal: String,
+    val thumbnail: String,
     val namaApp: String,
-    val appTitle: String,
+    val urlApp: String,
     val durasiApp: String,
     val durasiTV: String
 )
@@ -67,19 +71,67 @@ fun DashboardScreen(
 
     LaunchedEffect(Unit) { Log.d("Dashboard", "Dashboard loaded successfully") }
 
-    // read start time
     val prefs = remember { context.getSharedPreferences("tv_prefs", Context.MODE_PRIVATE) }
     var startMs by remember { mutableStateOf(prefs.getLong("tv_timer_start_ms", 0L)) }
 
-    // refresh tick
+    // ----- Filter preset state -----
+    // All | Today | Last 7 Days | Last 30 Days
+    var filterExpanded by remember { mutableStateOf(false) }
+    var filterLabel by remember { mutableStateOf("All") }
+    var dateFrom by remember { mutableStateOf<String?>(null) }
+    var dateTo by remember { mutableStateOf<String?>(null) }
+
+    fun setPreset(preset: String) {
+        filterLabel = preset
+        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val cal = Calendar.getInstance()
+
+        when (preset) {
+            "All" -> {
+                dateFrom = null
+                dateTo = null
+            }
+            "Today" -> {
+                val end = fmt.format(cal.time)
+                cal.set(Calendar.HOUR_OF_DAY, 0)
+                cal.set(Calendar.MINUTE, 0)
+                cal.set(Calendar.SECOND, 0)
+                cal.set(Calendar.MILLISECOND, 0)
+                val start = fmt.format(cal.time)
+                dateFrom = "$start 00:00:00"
+                dateTo = "$end 23:59:59"
+            }
+            "Last 7 Days" -> {
+                val end = fmt.format(cal.time)
+                cal.add(Calendar.DAY_OF_YEAR, -6)
+                val start = fmt.format(cal.time)
+                dateFrom = "$start 00:00:00"
+                dateTo = "$end 23:59:59"
+            }
+            "Last 30 Days" -> {
+                val end = fmt.format(cal.time)
+                cal.add(Calendar.DAY_OF_YEAR, -29)
+                val start = fmt.format(cal.time)
+                dateFrom = "$start 00:00:00"
+                dateTo = "$end 23:59:59"
+            }
+        }
+    }
+
+    // small tick to force reloads
     var refreshTick by remember { mutableStateOf(0) }
     fun refreshHistoryNow() { refreshTick++ }
 
-    // load history (now uses npsn + serial)
-    LaunchedEffect(npsn, serial, refreshTick) {
+    // Load history with filters
+    LaunchedEffect(serial, npsn, refreshTick, dateFrom, dateTo) {
         try {
             val resp = withContext(Dispatchers.IO) {
-                RetrofitClient.api.getUsageHistory(npsn, serial).execute()
+                RetrofitClient.api.getUsageHistory(
+                    npsn = npsn,
+                    serial = serial,
+                    dateFrom = dateFrom,
+                    dateTo = dateTo
+                ).execute()
             }
             val dtoList = if (resp.isSuccessful) resp.body()?.data.orEmpty() else emptyList()
 
@@ -90,8 +142,9 @@ fun DashboardScreen(
                         no = idx + 1,
                         snTV = d.snTv,
                         tanggal = jsonDateToString(d.date),
+                        thumbnail = d.thumbnail ?: "",
                         namaApp = d.appName,
-                        appTitle = d.appTitle ?: "",
+                        urlApp = d.appTitle ?: d.appTitle, // show title if present
                         durasiApp = formatSeconds(d.appDuration ?: 0),
                         durasiTV  = formatSeconds(d.tvDuration ?: 0)
                     )
@@ -104,7 +157,7 @@ fun DashboardScreen(
         }
     }
 
-    // listen for service broadcasts
+    // listen for history posted + timer reset done
     DisposableEffect(Unit) {
         val filter = IntentFilter().apply {
             addAction(ForegroundAppService.ACTION_HISTORY_POSTED)
@@ -112,17 +165,12 @@ fun DashboardScreen(
         }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                when (intent?.action) {
-                    ForegroundAppService.ACTION_HISTORY_POSTED -> {
-                        refreshHistoryNow()
-                        startMs = prefs.getLong("tv_timer_start_ms", 0L)
-                    }
-                    ForegroundAppService.ACTION_TIMER_RESET_DONE -> {
-                        val newStart = intent.getLongExtra(ForegroundAppService.EXTRA_NEW_START_MS, 0L)
-                        startMs = if (newStart > 0L) newStart else prefs.getLong("tv_timer_start_ms", 0L)
-                        refreshHistoryNow()
-                    }
+                if (intent?.action == ForegroundAppService.ACTION_TIMER_RESET_DONE) {
+                    val newStart = intent.getLongExtra(ForegroundAppService.EXTRA_NEW_START_MS, 0L)
+                    if (newStart > 0) startMs = newStart
                 }
+                refreshHistoryNow()
+                startMs = prefs.getLong("tv_timer_start_ms", 0L)
             }
         }
         if (Build.VERSION.SDK_INT >= 33) {
@@ -133,8 +181,8 @@ fun DashboardScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    // gentle polling
-    LaunchedEffect(npsn, serial) {
+    // fallback polling
+    LaunchedEffect(serial) {
         while (isActive) {
             delay(10_000)
             refreshHistoryNow()
@@ -147,7 +195,7 @@ fun DashboardScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // close button row
+        // Close button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -169,14 +217,14 @@ fun DashboardScreen(
             }
         }
 
-        // cards row
+        // Cards row (left: school info, right: timer)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // school card
+            // School Info Card
             Card(
                 modifier = Modifier.weight(1f),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -210,7 +258,7 @@ fun DashboardScreen(
                 }
             }
 
-            // timer card
+            // Timer Card
             Card(
                 modifier = Modifier.wrapContentWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -226,7 +274,7 @@ fun DashboardScreen(
             }
         }
 
-        // header + actions
+        // Title + actions row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -242,12 +290,17 @@ fun DashboardScreen(
                 color = Color.Black
             )
 
-            Row {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+
+                // Reset button
                 Button(
                     onClick = {
                         context.sendBroadcast(
                             Intent(ForegroundAppService.ACTION_REQUEST_RESET_TIMER)
                         )
+                        prefs.edit().putLong("tv_timer_start_ms", 0L).apply()
+                        startMs = 0L
+                        refreshHistoryNow()
                     },
                     modifier = Modifier
                         .height(36.dp)
@@ -272,52 +325,74 @@ fun DashboardScreen(
                     )
                 }
 
-                Button(
-                    onClick = { /* Handle filter */ },
-                    modifier = Modifier.padding(end = 8.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DateRange,
-                        contentDescription = "Filter",
-                        modifier = Modifier.size(16.dp),
-                        tint = Color.Black
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Filter",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        fontFamily = getRobotoFontFamily(),
-                        color = Color.Black
-                    )
-                }
+                // Filter menu (presets)
+                Box {
+                    Button(
+                        onClick = { filterExpanded = true },
+                        modifier = Modifier,
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DateRange,
+                            contentDescription = "Filter",
+                            modifier = Modifier.size(16.dp),
+                            tint = Color.Black
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Filter: $filterLabel",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            fontFamily = getRobotoFontFamily(),
+                            color = Color.Black
+                        )
+                    }
 
-                Button(
-                    onClick = { /* Handle PDF export */ },
-                    colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.GetApp,
-                        contentDescription = "PDF",
-                        modifier = Modifier.size(16.dp),
-                        tint = Color.Black
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "PDF",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        fontFamily = getRobotoFontFamily(),
-                        color = Color.Black
-                    )
+                    DropdownMenu(
+                        expanded = filterExpanded,
+                        onDismissRequest = { filterExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("All") },
+                            onClick = {
+                                filterExpanded = false
+                                setPreset("All")
+                                refreshHistoryNow()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Today") },
+                            onClick = {
+                                filterExpanded = false
+                                setPreset("Today")
+                                refreshHistoryNow()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Last 7 Days") },
+                            onClick = {
+                                filterExpanded = false
+                                setPreset("Last 7 Days")
+                                refreshHistoryNow()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Last 30 Days") },
+                            onClick = {
+                                filterExpanded = false
+                                setPreset("Last 30 Days")
+                                refreshHistoryNow()
+                            }
+                        )
+                    }
+
                 }
+                // (PDF button removed as requested)
             }
         }
 
-        // history table
+        // ===== Table =====
         Card(
             modifier = Modifier
                 .weight(1f)
@@ -337,8 +412,9 @@ fun DashboardScreen(
                     TableHeaderCell("No.", weight = 0.7f)
                     TableHeaderCell("SN-TV", weight = 1.2f)
                     TableHeaderCell("Tanggal", weight = 1.3f)
-                    TableHeaderCell("Nama App", weight = 1.6f)
-                    TableHeaderCell("App Title", weight = 2.4f)
+                    TableHeaderCell("Thumbnail", weight = 1.2f)
+                    TableHeaderCell("Nama App", weight = 1.2f)
+                    TableHeaderCell("App Title", weight = 1.8f)
                     TableHeaderCell("Durasi App", weight = 1.3f)
                     TableHeaderCell("Durasi TV", weight = 1.3f)
                 }
@@ -357,8 +433,25 @@ fun DashboardScreen(
                             TableDataCell(item.no.toString(), weight = 0.7f)
                             TableDataCell(item.snTV, weight = 1.2f)
                             TableDataCell(item.tanggal, weight = 1.3f)
-                            TableDataCell(item.namaApp, weight = 1.6f)
-                            TableDataCell(item.appTitle, weight = 2.4f)
+
+                            Box(
+                                modifier = Modifier
+                                    .weight(1.2f)
+                                    .height(32.dp)
+                                    .padding(end = 12.dp)
+                                    .background(Color(0xFFF0F0F0), RoundedCornerShape(4.dp))
+                                    .border(1.dp, Color(0xFFE0E0E0), RoundedCornerShape(4.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.placeholder_img),
+                                    contentDescription = "Thumbnail",
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            TableDataCell(item.namaApp, weight = 1.2f)
+                            TableDataCell(item.urlApp, weight = 1.8f) // now shows App Title
                             TableDataCell(item.durasiApp, weight = 1.3f)
                             TableDataCell(item.durasiTV, weight = 1.3f)
                         }
@@ -368,7 +461,7 @@ fun DashboardScreen(
                         }
                     }
 
-                    // spacer rows (optional)
+                    // spacer rows
                     items(4) {
                         Row(
                             modifier = Modifier
@@ -377,7 +470,7 @@ fun DashboardScreen(
                                 .padding(horizontal = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            repeat(7) { Box(modifier = Modifier.weight(1f)) }
+                            repeat(8) { Box(modifier = Modifier.weight(1f)) }
                         }
                         Divider(color = Color(0xFFE0E0E0), thickness = 1.dp)
                     }
@@ -385,6 +478,7 @@ fun DashboardScreen(
             }
         }
 
+        // about
         Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -451,13 +545,12 @@ fun DashboardScreenPreview() {
     TerasTVTheme {
         DashboardScreen(
             npsn = "01234567",
-            namaSekolah = "SMKN 1 NEGERI TANGERANG",
+            namaSekolah = "SMKN 1 NEGERI TANGGERANG",
             serial = "SN-TV"
         )
     }
 }
 
-/** Counter that waits until startMs > 0; safe across recompositions. */
 @Composable
 fun TVDurationCounterStartable(startMs: Long) {
     if (startMs <= 0L) {

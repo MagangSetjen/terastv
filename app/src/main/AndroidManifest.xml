@@ -54,22 +54,25 @@
         <!-- Boot/shutdown to reset timers -->
         <receiver
             android:name=".system.TvLifecycleReceiver"
-            android:exported="false">
+            android:exported="false"
+            android:directBootAware="true">
             <intent-filter>
                 <action android:name="android.intent.action.ACTION_SHUTDOWN" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- extra boot/update actions for reliability -->
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
-        <!-- ✅ AccessibilityService to read window/app titles (required to capture video titles/taglines) -->
+        <!-- ✅ AccessibilityService to read window/app titles (optional: needed if you want video/search titles) -->
         <service
-            android:name=".AppTitleService"
+            android:name=".title.AppTitleService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
-            <!-- This XML defines service settings (events listened, feedback type, etc.) -->
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
