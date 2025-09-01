@@ -195,27 +195,7 @@ fun DashboardScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Close button
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.End
-        ) {
-            IconButton(
-                onClick = { /* Handle close */ },
-                modifier = Modifier
-                    .size(32.dp)
-                    .background(Color.White, RoundedCornerShape(6.dp))
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Close",
-                    tint = Color.Red,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
-        }
+
 
         // Cards row (left: school info, right: timer)
         Row(
