@@ -1,3 +1,32 @@
 <resources>
     <string name="app_name">TerasTV</string>
+
+    <!--ABOUT-->
+        <string name="about_title">Tentang Aplikasi</string>
+        <string name="about_description">
+        TerasTV (Telaah Rekam Aktivitas Sekolah di Televisi) adalah aplikasi pemantauan penggunaan Smart TV di lingkungan sekolah.
+        Aplikasi ini menampilkan riwayat aktivitas penggunaan Smart TV, durasi penggunaan aplikasi,
+        serta detail lain seperti serial number pada Smart TV dan tautan konten yang diakses.
+        Tujuannya untuk membantu pihak sekolah melakukan pengawasan yang transparan dan rapi pada Smart TV di lingkungan Sekolah.
+    </string>
+        <string name="about_feature_title">Fitur Utama</string>
+        <string name="about_feature_list">
+        • Ringkasan informasi sekolah dan perangkat\n
+        • Riwayat pemakaian Smart TV (aplikasi, URL, durasi)\n
+        • Filter berdasarkan tanggal dan ekspor PDF\n
+        • Tampilan yang ringan dan mudah dibaca
+        </string>
+        <string name="about_note_title">Catatan</string>
+        <string name="about_note_description">
+        Pastikan perangkat terhubung ke jaringan yang telah diizinkan.
+        Riwayat penggunaan Smart TV hanya akan diperbarui saat perangkat dalam keadaan menyala.
+        Jika Smart TV mati, tidak ada riwayat baru yang tercatat.
+    </string>
+        <string name="back_button_desc">Kembali</string>
+
+
+
 </resources>
+
+
+
